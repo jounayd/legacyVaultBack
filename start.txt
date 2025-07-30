@@ -1,0 +1,24 @@
+CREATE TABLE user (
+    id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+    email VARCHAR(120) NOT NULL UNIQUE,
+    password_hash VARCHAR(256) NOT NULL
+)
+
+
+CREATE TABLE vault_item (
+    id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+    category VARCHAR(80) NOT NULL,
+    title VARCHAR(120) NOT NULL,
+    encrypted_content TEXT NOT NULL
+)
+
+
+source ./venv/bin/activate
+flask --app app run --host=0.0.0.0 --port=4455
+
+
+flask shell
+
+from app import db
+db.create_all()
+exit()
