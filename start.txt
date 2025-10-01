@@ -22,3 +22,12 @@ flask shell
 from app import db
 db.create_all()
 exit()
+
+On server
+
+# --- NEWLY ADDED CODE ---
+# This route handles requests to the base /api/ endpoint.
+@app.route('/api/')
+def api_root():
+    return jsonify(message="Welcome to the LegacyVault API!")
+# --- END OF NEW CODE ---

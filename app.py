@@ -7,7 +7,7 @@ import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 import click
 
 app = Flask(__name__)
@@ -19,19 +19,25 @@ app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
 db = SQLAlchemy(app)
 
-MAILTRAP_HOST = "sandbox.smtp.mailtrap.io"
-MAILTRAP_PORT = 2525
-MAILTRAP_USER = os.environ.get('MAILTRAP_USER', 'bae4d3123ce126')
-MAILTRAP_PASS = os.environ.get('MAILTRAP_PASS', '832f5968bcfcf0')
-FROM_EMAIL = 'LegacyVault Demo <demo@legacyvault.com>'
+# --- Hostinger Email Configuration ---
+SMTP_HOST = "smtp.hostinger.com"
+SMTP_PORT = 465
+SMTP_USER = "jy@jounayd.net"
+# --- MODIFICATION START ---
+# Corrected the password to remove the trailing period.
+SMTP_PASS = "JOUjou84!"
+# --- MODIFICATION END ---
+FROM_EMAIL = "jy@jounayd.net"
+
+
+# --- Database Models ---
 
 class User(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     email = db.Column(db.String(120), unique=True, nullable=False)
     password_hash = db.Column(db.String(256), nullable=False)
-    last_login = db.Column(db.DateTime, default=datetime.utcnow)
+    last_login = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
     vault_items = db.relationship('VaultItem', backref='owner', lazy=True, cascade="all, delete-orphan")
-    # UPDATED: Relationship is now plural to support multiple beneficiaries
     beneficiaries = db.relationship('Beneficiary', backref='owner', lazy=True, cascade="all, delete-orphan")
     verifiers = db.relationship('Verifier', backref='owner', lazy=True, cascade="all, delete-orphan")
     protocol = db.relationship('Protocol', backref='owner', uselist=False, cascade="all, delete-orphan")
@@ -42,7 +48,6 @@ class VaultItem(db.Model):
     title = db.Column(db.String(120), nullable=False)
     encrypted_content = db.Column(db.Text, nullable=False)
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
-    # ADDED: Column to link an item to a specific beneficiary
     beneficiary_email = db.Column(db.String(120), nullable=True)
     
     def to_dict(self):
@@ -57,10 +62,8 @@ class VaultItem(db.Model):
 class Beneficiary(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     email = db.Column(db.String(120), nullable=False)
-    # UPDATED: Removed unique=True to allow multiple beneficiaries per user
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
     status = db.Column(db.String(50), nullable=False, default='pending')
-    # ADDED: Flag to identify the primary beneficiary
     is_primary = db.Column(db.Boolean, default=False, nullable=False)
     
     def to_dict(self): 
@@ -98,6 +101,13 @@ class KeyShard(db.Model):
     y_coord = db.Column(db.Text, nullable=False) 
     protocol_id = db.Column(db.Integer, db.ForeignKey('protocol.id'), nullable=False)
 
+    def to_dict(self):
+        return {
+            "verifier_email": self.verifier_email,
+            "x": self.x_coord,
+            "y": self.y_coord
+        }
+
 class ShardSubmission(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     verifier_email = db.Column(db.String(120), nullable=False)
@@ -106,53 +116,108 @@ class ShardSubmission(db.Model):
     protocol_id = db.Column(db.Integer, db.ForeignKey('protocol.id'), nullable=False)
     def to_dict(self): return {"verifier_email": self.verifier_email, "x": self.x_coord, "y": self.y_coord}
 
+# --- CLI and Email Functions ---
+
 @app.cli.command("init-db")
 def init_db_command():
     """Clear the existing data and create new tables."""
     db.create_all()
     click.echo("Initialized the database.")
 
-def send_invitation_email(to_email, role):
-    if not MAILTRAP_USER or 'YOUR_MAILTRAP_USERNAME' in MAILTRAP_USER:
-        print("!!! Mailtrap not configured. Skipping email send. !!!")
+def _send_email(to_email, subject, html_content):
+    if not SMTP_PASS:
+        print(f"!!! SMTP not configured. Skipping email send to {to_email}. !!!")
         return False
+    
     message = MIMEMultipart("alternative")
-    message["Subject"] = "You have been invited to LegacyVault"
+    message["Subject"] = subject
     message["From"] = FROM_EMAIL
     message["To"] = to_email
-    html_content = f'<strong>Hello,</strong><p>You have been designated as a {role} in a LegacyVault account. Please download the app and create an account with this email address to accept your role.</p>'
     message.attach(MIMEText(html_content, "html"))
+    
     try:
-        with smtplib.SMTP(MAILTRAP_HOST, MAILTRAP_PORT) as server:
-            server.starttls()
-            server.login(MAILTRAP_USER, MAILTRAP_PASS)
+        with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT) as server:
+            server.login(SMTP_USER, SMTP_PASS)
             server.sendmail(FROM_EMAIL, to_email, message.as_string())
-        print(f"Email captured by Mailtrap for recipient: {to_email}")
+        print(f"Email '{subject}' sent to {to_email} via Hostinger.")
         return True
     except Exception as e:
-        print(f"Error sending email to Mailtrap: {e}")
+        print(f"Error sending email via Hostinger: {e}")
         return False
 
-def send_protocol_alert_email(to_email):
-    if not MAILTRAP_USER or 'YOUR_MAILTRAP_USERNAME' in MAILTRAP_USER:
-        print("!!! Mailtrap not configured. Skipping email send. !!!")
-        return False
-    message = MIMEMultipart("alternative")
-    message["Subject"] = "URGENT: Your LegacyVault Protocol Has Been Initiated"
-    message["From"] = FROM_EMAIL
-    message["To"] = to_email
-    html_content = f'<strong>Hello,</strong><p>This is an urgent notification to inform you that the Fallen Star protocol for your LegacyVault account has been initiated by one of your designees.</p><p>If this is a mistake, please log in to your account immediately and revert the protocol.</p>'
-    message.attach(MIMEText(html_content, "html"))
-    try:
-        with smtplib.SMTP(MAILTRAP_HOST, MAILTRAP_PORT) as server:
-            server.starttls()
-            server.login(MAILTRAP_USER, MAILTRAP_PASS)
-            server.sendmail(FROM_EMAIL, to_email, message.as_string())
-        print(f"Protocol alert email captured by Mailtrap for recipient: {to_email}")
-        return True
-    except Exception as e:
-        print(f"Error sending protocol alert email: {e}")
-        return False
+def send_welcome_email(to_email):
+    subject = "Welcome to LegacyVault!"
+    html_content = """
+    <strong>Welcome to LegacyVault!</strong>
+    <p>Your secure, decentralized vault has been created.</p>
+    <p><b>CRITICAL:</b> Your security is based on your Master Password. We never store it and cannot recover it for you. If you forget your password, you will lose access to your vault forever. Please store it in a safe place.</p>
+    """
+    _send_email(to_email, subject, html_content)
+
+def send_designee_added_email(to_email, owner_email, role):
+    subject = f"You have been designated as a {role} on LegacyVault"
+    html_content = """
+    <strong>Hello,</strong>
+    <p>You have been designated as a {role} for {owner_email}'s LegacyVault account.</p>
+    <p>Please download the LegacyVault app and create an account with this email address ({to_email}) to accept your role and view your responsibilities.</p>
+    """.format(role=role, owner_email=owner_email, to_email=to_email)
+    _send_email(to_email, subject, html_content)
+    
+def send_owner_designee_added_notification(owner_email, designee_email, role):
+    subject = f"You have added a new {role}"
+    html_content = """
+    <strong>Hello {owner_email},</strong>
+    <p>This is a confirmation that you have successfully added {designee_email} as a {role} for your LegacyVault account.</p>
+    <p>They have been sent an invitation to join and accept their role.</p>
+    """.format(owner_email=owner_email, designee_email=designee_email, role=role)
+    _send_email(owner_email, subject, html_content)
+
+def send_protocol_initiation_emails(owner, initiator_email):
+    print(f"Sending protocol initiation alerts for owner {owner.email}...")
+    
+    owner_subject = "URGENT: Your LegacyVault Protocol Has Been Initiated"
+    owner_html = """
+    <strong>Hello {owner_email},</strong>
+    <p>This is an urgent notification to inform you that the 'Fallen Star' protocol for your LegacyVault account was initiated by {initiator_email}.</p>
+    <p><b>If this is a mistake, please log in to your account immediately and revert the protocol.</b></p>
+    """.format(owner_email=owner.email, initiator_email=initiator_email)
+    _send_email(owner.email, owner_subject, owner_html)
+    
+    all_designees = owner.beneficiaries + owner.verifiers
+    designee_subject = f"LegacyVault Protocol Initiated for {owner.email}"
+    designee_html = """
+    <strong>Hello,</strong>
+    <p>This is a notification that the 'Fallen Star' protocol for {owner_email}'s LegacyVault account has been initiated by {initiator_email}.</p>
+    <p>If you are a verifier, you may now log in to the app to submit your approval shard. The vault cannot be unlocked until enough verifiers have approved.</p>
+    """.format(owner_email=owner.email, initiator_email=initiator_email)
+    for designee in all_designees:
+        if designee.status == 'accepted':
+            _send_email(designee.email, designee_subject, designee_html)
+
+def send_shard_distribution_email(verifier_email, owner_email, shard_data):
+    subject = f"Your LegacyVault Key Shard for {owner_email}"
+    html_content = """
+    <strong>Hello {verifier_email},</strong>
+    <p>The owner of the LegacyVault account, {owner_email}, has secured their vault and distributed the encrypted key shards.</p>
+    <p>This email contains your unique shard. <b>Please keep this email safe and do not delete it.</b> You will need the information from this shard to help unlock the vault if the protocol is ever initiated.</p>
+    <hr>
+    <p><b>Your Key Shard:</b></p>
+    <pre>
+    X-Coordinate: {x_coord}
+    Y-Coordinate: {y_coord}
+    </pre>
+    <hr>
+    <p>No action is needed from you at this time. This is for your records only.</p>
+    """.format(
+        verifier_email=verifier_email, 
+        owner_email=owner_email, 
+        x_coord=shard_data['x'], 
+        y_coord=shard_data['y']
+    )
+    _send_email(verifier_email, subject, html_content)
+
+
+# --- API Endpoints ---
 
 @app.route("/api/register", methods=['POST'])
 def register():
@@ -165,6 +230,7 @@ def register():
     new_user.protocol = Protocol(status='active')
     db.session.add(new_user)
     db.session.commit()
+    send_welcome_email(new_user.email)
     return jsonify({"message": "User registered", "user_id": new_user.id}), 201
 
 @app.route("/api/login", methods=['POST'])
@@ -174,7 +240,7 @@ def login():
     if not user or not check_password_hash(user.password_hash, data['password']):
         return jsonify({"error": "Invalid credentials"}), 401
     
-    user.last_login = datetime.utcnow()
+    user.last_login = datetime.now(timezone.utc)
     db.session.commit()
     
     return jsonify({"message": "Login successful", "user_id": user.id})
@@ -209,7 +275,7 @@ def manage_user_vault(user_id):
             category=data["category"],
             title=data["title"],
             encrypted_content=data["encrypted_content"],
-            beneficiary_email=data.get("beneficiary_email"), # Save the assigned beneficiary
+            beneficiary_email=data.get("beneficiary_email"),
             user_id=user_id
         )
         db.session.add(new_item)
@@ -227,7 +293,7 @@ def manage_vault_item(item_id):
         item.category = data.get("category", item.category)
         item.title = data.get("title", item.title)
         item.encrypted_content = data.get("encrypted_content", item.encrypted_content)
-        item.beneficiary_email = data.get("beneficiary_email", item.beneficiary_email) # Update beneficiary
+        item.beneficiary_email = data.get("beneficiary_email", item.beneficiary_email)
         db.session.commit()
         return jsonify(item.to_dict())
         
@@ -240,12 +306,10 @@ def manage_vault_item(item_id):
 def get_designees(user_id):
     user = User.query.get(user_id)
     if not user: return jsonify({"error": "User not found"}), 404
-    # UPDATED: Return a list of beneficiaries
     beneficiaries = [b.to_dict() for b in user.beneficiaries]
     verifiers = [v.to_dict() for v in user.verifiers]
     return jsonify({"beneficiaries": beneficiaries, "verifiers": verifiers})
 
-# UPDATED: Endpoint to add a new beneficiary
 @app.route("/api/beneficiary/<int:user_id>", methods=['POST'])
 def add_beneficiary(user_id):
     user = User.query.get(user_id)
@@ -253,26 +317,23 @@ def add_beneficiary(user_id):
     data = request.get_json()
     email = data['email'].lower()
 
-    # Check if this beneficiary already exists for this user
     if Beneficiary.query.filter_by(user_id=user_id, email=email).first():
         return jsonify({"error": "Beneficiary already added"}), 409
 
-    # If this is the first beneficiary, make them primary
     is_first_beneficiary = not user.beneficiaries
     
     new_beneficiary = Beneficiary(email=email, owner=user, status='pending', is_primary=is_first_beneficiary)
     db.session.add(new_beneficiary)
     db.session.commit()
-    send_invitation_email(email, 'Beneficiary')
+    send_designee_added_email(email, user.email, 'Beneficiary')
+    send_owner_designee_added_notification(user.email, email, 'Beneficiary')
     return jsonify(new_beneficiary.to_dict()), 201
 
-# NEW: Endpoint to delete a beneficiary
 @app.route("/api/beneficiary/<int:beneficiary_id>", methods=['DELETE'])
 def delete_beneficiary(beneficiary_id):
     beneficiary = Beneficiary.query.get(beneficiary_id)
     if not beneficiary: return jsonify({"error": "Beneficiary not found"}), 404
     
-    # If deleting the primary beneficiary, we need to handle this case
     if beneficiary.is_primary:
         return jsonify({"error": "Cannot delete the primary beneficiary. Please set another beneficiary as primary first."}), 400
         
@@ -280,18 +341,15 @@ def delete_beneficiary(beneficiary_id):
     db.session.commit()
     return jsonify({"message": "Beneficiary deleted"})
 
-# NEW: Endpoint to set a beneficiary as primary
 @app.route("/api/beneficiary/set_primary/<int:beneficiary_id>", methods=['POST'])
 def set_primary_beneficiary(beneficiary_id):
     new_primary = Beneficiary.query.get(beneficiary_id)
     if not new_primary: return jsonify({"error": "Beneficiary not found"}), 404
 
-    # Find the current primary and set it to false
     current_primary = Beneficiary.query.filter_by(user_id=new_primary.user_id, is_primary=True).first()
     if current_primary:
         current_primary.is_primary = False
     
-    # Set the new primary
     new_primary.is_primary = True
     db.session.commit()
     return jsonify(new_primary.to_dict())
@@ -303,7 +361,6 @@ def add_verifier(user_id):
     if not user: return jsonify({"error": "User not found"}), 404
     data = request.get_json()
     email = data['email'].lower()
-    # UPDATED: Allow 'notary' as a verifier type
     verifier_type = data.get('verifier_type', 'personal')
     if verifier_type not in ['personal', 'professional', 'notary']:
         return jsonify({"error": "Invalid verifier type"}), 400
@@ -311,7 +368,8 @@ def add_verifier(user_id):
     new_verifier = Verifier(email=email, verifier_type=verifier_type, owner=user, status='pending')
     db.session.add(new_verifier)
     db.session.commit()
-    send_invitation_email(email, 'Verifier')
+    send_designee_added_email(email, user.email, 'Verifier')
+    send_owner_designee_added_notification(user.email, email, 'Verifier')
     return jsonify(new_verifier.to_dict()), 201
 
 @app.route("/api/verifier/<int:verifier_id>", methods=['PUT', 'DELETE'])
@@ -352,7 +410,9 @@ def post_shards(user_id):
     data = request.get_json()
     shards = data.get('shards') 
     if not isinstance(shards, list): return jsonify({"error": "Invalid payload: 'shards' must be a list"}), 400
+    
     KeyShard.query.filter_by(protocol_id=user.protocol.id).delete()
+    
     for shard_info in shards:
         new_shard = KeyShard(
             protocol_id=user.protocol.id,
@@ -361,8 +421,23 @@ def post_shards(user_id):
             y_coord=shard_info['y']
         )
         db.session.add(new_shard)
+        send_shard_distribution_email(new_shard.verifier_email, user.email, shard_info)
+
     db.session.commit()
-    return jsonify({"message": f"{len(shards)} shards have been stored."})
+    return jsonify({"message": f"{len(shards)} shards have been stored and sent."})
+
+@app.route("/api/protocol/shards/<int:user_id>", methods=['GET'])
+def get_shards(user_id):
+    user = User.query.get(user_id)
+    if not user or not user.protocol:
+        return jsonify({"error": "User or protocol not found"}), 404
+    
+    shards = KeyShard.query.filter_by(protocol_id=user.protocol.id).all()
+    if not shards:
+        return jsonify([])
+
+    return jsonify([shard.to_dict() for shard in shards])
+
 
 @app.route("/api/protocol/shard/<int:owner_user_id>/<path:verifier_email>", methods=['GET'])
 def get_shard_for_verifier(owner_user_id, verifier_email):
@@ -411,14 +486,14 @@ def initiate_protocol(owner_user_id):
     if accepted_verifiers_count < 2: 
         return jsonify({"error": f"Protocol cannot be initiated. At least 2 accepted verifiers are required, but only {accepted_verifiers_count} were found."}), 400
 
-    owner.protocol.status = "pending_verification"
-    owner.protocol.initiated_at = datetime.utcnow()
+    owner.protocol.status = "pending"
+    owner.protocol.initiated_at = datetime.now(timezone.utc)
     owner.protocol.initiated_by = initiator_email.lower()
     db.session.commit()
     
-    send_protocol_alert_email(owner.email)
+    send_protocol_initiation_emails(owner, initiator_email)
     
-    return jsonify({"message": "Protocol initiated. The vault owner has been notified and a 30-day verification period has begun."})
+    return jsonify({"message": "Protocol initiated. The protocol is now pending verifier approval."})
 
 
 @app.route("/api/protocol/submit_shard/<int:owner_user_id>", methods=['POST'])
@@ -454,7 +529,6 @@ def get_submitted_shards(owner_user_id):
     submissions = ShardSubmission.query.filter_by(protocol_id=owner.protocol.id).all()
     return jsonify({"shards": [s.to_dict() for s in submissions]})
 
-# UPDATED: Endpoint to get vault contents for a specific beneficiary
 @app.route("/api/beneficiary/vault/<int:owner_user_id>", methods=['GET'])
 def get_beneficiary_vault(owner_user_id):
     owner = User.query.get(owner_user_id)
@@ -468,18 +542,15 @@ def get_beneficiary_vault(owner_user_id):
     if not requester_email:
         return jsonify({"error": "beneficiary_email parameter is required"}), 400
 
-    # Check if the requester is a valid beneficiary for this owner
     beneficiary_role = Beneficiary.query.filter_by(user_id=owner_user_id, email=requester_email.lower()).first()
     if not beneficiary_role:
         return jsonify({"error": "Access denied. You are not a designated beneficiary for this vault."}), 403
     
-    # If the beneficiary is primary, they get their own items PLUS unassigned items
     if beneficiary_role.is_primary:
         items = VaultItem.query.filter(
             VaultItem.user_id == owner_user_id,
             (VaultItem.beneficiary_email == None) | (VaultItem.beneficiary_email == requester_email.lower())
         ).all()
-    # Otherwise, they only get items specifically assigned to them
     else:
         items = VaultItem.query.filter_by(user_id=owner_user_id, beneficiary_email=requester_email.lower()).all()
 
@@ -501,3 +572,4 @@ def health_check(): return jsonify(status="ok", message="LegacyVault Python API 
 
 if __name__ == '__main__':
     app.run(host="0.0.0.0", port=4455, debug=True)
+
