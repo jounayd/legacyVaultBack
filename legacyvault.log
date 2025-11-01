@@ -1,0 +1,3 @@
+2025-11-01 12:10:46,676 INFO: Email 'LegacyVault Protocol Initiated for u@g.com' sent to v@g.com via Hostinger. [in /Volumes/jounayd SSD/Projects/LegacyVault_backend/app.py:183]
+2025-11-01 12:10:47,187 INFO: Email 'LegacyVault Protocol Initiated for u@g.com' sent to b@g.com via Hostinger. [in /Volumes/jounayd SSD/Projects/LegacyVault_backend/app.py:183]
+2025-11-01 12:10:47,187 INFO: Protocol for owner 1 initiated successfully. [in /Volumes/jounayd SSD/Projects/LegacyVault_backend/app.py:674]

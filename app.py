@@ -9,9 +9,12 @@ from email.mime.multipart import MIMEMultipart
 import json
 from datetime import datetime, timezone
 import click
+# Logging imports removed
 
 app = Flask(__name__)
 CORS(app)
+
+# Logging configuration removed
 
 basedir = os.path.abspath(os.path.dirname(__file__))
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///' + os.path.join(basedir, 'legacyvault.db')
@@ -23,10 +26,7 @@ db = SQLAlchemy(app)
 SMTP_HOST = "smtp.hostinger.com"
 SMTP_PORT = 465
 SMTP_USER = "jy@jounayd.net"
-# --- MODIFICATION START ---
-# Corrected the password to remove the trailing period.
 SMTP_PASS = "JOUjou84!"
-# --- MODIFICATION END ---
 FROM_EMAIL = "jy@jounayd.net"
 
 
@@ -49,6 +49,7 @@ class VaultItem(db.Model):
     encrypted_content = db.Column(db.Text, nullable=False)
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
     beneficiary_email = db.Column(db.String(120), nullable=True)
+    files = db.relationship('VaultFile', backref='vault_item', lazy=True, cascade="all, delete-orphan")
     
     def to_dict(self):
         return {
@@ -56,7 +57,23 @@ class VaultItem(db.Model):
             "category": self.category,
             "title": self.title,
             "encrypted_content": self.encrypted_content,
-            "beneficiary_email": self.beneficiary_email
+            "beneficiary_email": self.beneficiary_email,
+            "files": [f.to_dict() for f in self.files]
+        }
+
+class VaultFile(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    encrypted_filename = db.Column(db.Text, nullable=False)
+    encrypted_file_b64 = db.Column(db.Text, nullable=False)
+    file_size_bytes = db.Column(db.Integer, nullable=False)
+    vault_item_id = db.Column(db.Integer, db.ForeignKey('vault_item.id'), nullable=False)
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "encrypted_filename": self.encrypted_filename,
+            "encrypted_file_b64": self.encrypted_file_b64,
+            "file_size_bytes": self.file_size_bytes
         }
 
 class Beneficiary(db.Model):
@@ -92,7 +109,6 @@ class Protocol(db.Model):
     shard_submissions = db.relationship('ShardSubmission', backref='protocol', lazy=True, cascade="all, delete-orphan")
     initiated_at = db.Column(db.DateTime, nullable=True)
     initiated_by = db.Column(db.String(120), nullable=True)
-
 
 class KeyShard(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -194,6 +210,33 @@ def send_protocol_initiation_emails(owner, initiator_email):
         if designee.status == 'accepted':
             _send_email(designee.email, designee_subject, designee_html)
 
+# --- NEW EMAIL FUNCTION ---
+def send_vault_released_emails(owner):
+    print(f"Sending vault released alerts for owner {owner.email}...")
+
+    # --- 1. Notify Owner ---
+    owner_subject = "ALERT: Your LegacyVault Has Been Released"
+    owner_html = """
+    <strong>Hello {owner_email},</strong>
+    <p>This is a final notification that the 'Fallen Star' protocol for your LegacyVault account has received the required number of verifier approvals.</p>
+    <p><b>Your vault has been released and is now accessible to your designated beneficiaries.</b></p>
+    <p>If this is an error, please log in to your account, reset the protocol, and consider changing your verifiers immediately.</p>
+    """.format(owner_email=owner.email)
+    _send_email(owner.email, owner_subject, owner_html)
+
+    # --- 2. Notify Accepted Beneficiaries ---
+    beneficiaries = Beneficiary.query.filter_by(user_id=owner.id, status='accepted').all()
+    beneficiary_subject = f"LegacyVault Released: Access Granted to {owner.email}'s Vault"
+    beneficiary_html = """
+    <strong>Hello,</strong>
+    <p>This is a notification that the LegacyVault for {owner_email} has been successfully verified and released.</p>
+    <p>As a designated beneficiary, you can now log in to the LegacyVault app to access the items assigned to you.</p>
+    """.format(owner_email=owner.email)
+    
+    for beneficiary in beneficiaries:
+        _send_email(beneficiary.email, beneficiary_subject, beneficiary_html)
+# --- END NEW FUNCTION ---
+
 def send_shard_distribution_email(verifier_email, owner_email, shard_data):
     subject = f"Your LegacyVault Key Shard for {owner_email}"
     html_content = """
@@ -279,7 +322,31 @@ def manage_user_vault(user_id):
             user_id=user_id
         )
         db.session.add(new_item)
-        db.session.commit()
+        
+        try:
+            db.session.commit()
+        except Exception as e:
+            db.session.rollback()
+            return jsonify({"error": f"Failed to create vault item: {str(e)}"}), 500
+
+        files_data = data.get('files', [])
+        if files_data:
+            try:
+                for file_data in files_data:
+                    new_file = VaultFile(
+                        encrypted_filename=file_data['encrypted_filename'],
+                        encrypted_file_b64=file_data['encrypted_file_b64'],
+                        file_size_bytes=file_data['file_size_bytes'],
+                        vault_item_id=new_item.id 
+                    )
+                    db.session.add(new_file)
+                db.session.commit()
+            except Exception as e:
+                db.session.rollback()
+                return jsonify({"error": f"Item created, but failed to save files: {str(e)}"}), 500
+        
+        db.session.refresh(new_item)
+        
         return jsonify(new_item.to_dict()), 201
 
 @app.route("/api/vault/item/<int:item_id>", methods=['PUT', 'DELETE'])
@@ -290,11 +357,38 @@ def manage_vault_item(item_id):
     
     if request.method == 'PUT':
         data = request.get_json()
+        
         item.category = data.get("category", item.category)
         item.title = data.get("title", item.title)
         item.encrypted_content = data.get("encrypted_content", item.encrypted_content)
         item.beneficiary_email = data.get("beneficiary_email", item.beneficiary_email)
-        db.session.commit()
+        
+        files_payload = data.get('files', [])
+        current_file_ids = {f.id for f in item.files}
+        incoming_file_ids = {f['id'] for f in files_payload if 'id' in f}
+        ids_to_delete = current_file_ids - incoming_file_ids
+        
+        if ids_to_delete:
+            VaultFile.query.filter(VaultFile.id.in_(ids_to_delete)).delete(synchronize_session=False)
+            
+        for file_data in files_payload:
+            if 'id' not in file_data:
+                new_file = VaultFile(
+                    encrypted_filename=file_data['encrypted_filename'],
+                    encrypted_file_b64=file_data['encrypted_file_b64'],
+                    file_size_bytes=file_data['file_size_bytes'],
+                    vault_item_id=item.id
+                )
+                db.session.add(new_file)
+
+        try:
+            db.session.commit()
+        except Exception as e:
+            db.session.rollback()
+            return jsonify({"error": f"Failed to update item: {str(e)}"}), 500
+        
+        db.session.refresh(item)
+            
         return jsonify(item.to_dict())
         
     elif request.method == 'DELETE':
@@ -362,6 +456,7 @@ def add_verifier(user_id):
     data = request.get_json()
     email = data['email'].lower()
     verifier_type = data.get('verifier_type', 'personal')
+    
     if verifier_type not in ['personal', 'professional', 'notary']:
         return jsonify({"error": "Invalid verifier type"}), 400
 
@@ -376,12 +471,14 @@ def add_verifier(user_id):
 def manage_verifier(verifier_id):
     verifier = Verifier.query.get(verifier_id)
     if not verifier: return jsonify({"error": "Verifier not found"}), 404
+    
     if request.method == 'PUT':
         data = request.get_json()
         verifier.email = data.get('email', verifier.email).lower()
         verifier.verifier_type = data.get('verifier_type', verifier.verifier_type)
         db.session.commit()
         return jsonify(verifier.to_dict())
+        
     elif request.method == 'DELETE':
         db.session.delete(verifier)
         db.session.commit()
@@ -444,7 +541,8 @@ def get_shard_for_verifier(owner_user_id, verifier_email):
     owner = User.query.get(owner_user_id)
     if not owner or not owner.protocol: return jsonify({"error": "Protocol not found"}), 404
     shard = KeyShard.query.filter_by(protocol_id=owner.protocol.id, verifier_email=verifier_email.lower()).first()
-    if not shard: return jsonify({"error": "Shard not found for this verifier"}), 404
+    if not shard: 
+        return jsonify({"error": "Shard not found for this verifier"}), 404
     return jsonify({"verifier_email": shard.verifier_email, "x": shard.x_coord, "y": shard.y_coord})
 
 @app.route("/api/protocol/status/<int:owner_user_id>", methods=['GET'])
@@ -458,7 +556,7 @@ def get_protocol_status(owner_user_id):
     required_shards = 2 
     submitted_shards = len(owner.protocol.shard_submissions)
     
-    return jsonify({
+    status_data = {
         "status": owner.protocol.status, 
         "owner_email": owner.email, 
         "required_shards": required_shards, 
@@ -466,7 +564,8 @@ def get_protocol_status(owner_user_id):
         "primary_beneficiary_email": primary_beneficiary_email,
         "initiated_at": owner.protocol.initiated_at.isoformat() if owner.protocol.initiated_at else None,
         "initiated_by": owner.protocol.initiated_by
-    })
+    }
+    return jsonify(status_data)
 
 @app.route("/api/protocol/initiate/<int:owner_user_id>", methods=['POST'])
 def initiate_protocol(owner_user_id):
@@ -474,7 +573,7 @@ def initiate_protocol(owner_user_id):
     initiator_email = data.get('initiator_email')
     if not initiator_email:
         return jsonify({"error": "Initiator email is required"}), 400
-
+    
     owner = User.query.get(owner_user_id)
     if not owner or not owner.protocol: return jsonify({"error": "Protocol not found"}), 404
 
@@ -502,6 +601,7 @@ def submit_shard(owner_user_id):
     verifier_email = data.get('verifier_email', '').lower()
     x_coord = data.get('x')
     y_coord = data.get('y')
+    
     owner = User.query.get(owner_user_id)
     if not owner or not owner.protocol: return jsonify({"error": "Protocol not found"}), 404
     if not verifier_email or not x_coord or not y_coord: return jsonify({"error": "Verifier email and shard coordinates are required"}), 400
@@ -510,22 +610,32 @@ def submit_shard(owner_user_id):
         return jsonify({"error": "Protocol has not been initiated yet."}), 400
     
     existing_submission = ShardSubmission.query.filter_by(protocol_id=owner.protocol.id, verifier_email=verifier_email).first()
-    if existing_submission: return jsonify({"message": "Shard already submitted"}), 200
+    if existing_submission: 
+        return jsonify({"message": "Shard already submitted"}), 200
+        
     original_shard = KeyShard.query.filter_by(protocol_id=owner.protocol.id, verifier_email=verifier_email).first()
-    if not original_shard or original_shard.x_coord != x_coord or original_shard.y_coord != y_coord: return jsonify({"error": "Invalid shard submitted."}), 400
+    if not original_shard or original_shard.x_coord != x_coord or original_shard.y_coord != y_coord: 
+        return jsonify({"error": "Invalid shard submitted."}), 400
+        
     new_submission = ShardSubmission(protocol_id=owner.protocol.id, verifier_email=verifier_email, x_coord=x_coord, y_coord=y_coord)
     db.session.add(new_submission)
     db.session.commit()
+    
     if len(owner.protocol.shard_submissions) >= 2:
         owner.protocol.status = "released"
         db.session.commit()
+        # --- NEW: Send vault released emails ---
+        send_vault_released_emails(owner)
+        
     return jsonify({"message": "Shard submitted successfully"})
 
 @app.route("/api/protocol/submitted_shards/<int:owner_user_id>", methods=['GET'])
 def get_submitted_shards(owner_user_id):
     owner = User.query.get(owner_user_id)
     if not owner or not owner.protocol: return jsonify({"error": "Protocol not found"}), 404
-    if owner.protocol.status != "released": return jsonify({"error": "Protocol not yet released"}), 403
+    if owner.protocol.status != "released": 
+        return jsonify({"error": "Protocol not yet released"}), 403
+        
     submissions = ShardSubmission.query.filter_by(protocol_id=owner.protocol.id).all()
     return jsonify({"shards": [s.to_dict() for s in submissions]})
 
@@ -541,7 +651,7 @@ def get_beneficiary_vault(owner_user_id):
     requester_email = request.args.get('beneficiary_email')
     if not requester_email:
         return jsonify({"error": "beneficiary_email parameter is required"}), 400
-
+    
     beneficiary_role = Beneficiary.query.filter_by(user_id=owner_user_id, email=requester_email.lower()).first()
     if not beneficiary_role:
         return jsonify({"error": "Access denied. You are not a designated beneficiary for this vault."}), 403
@@ -560,6 +670,7 @@ def get_beneficiary_vault(owner_user_id):
 def reset_protocol(owner_user_id):
     owner = User.query.get(owner_user_id)
     if not owner or not owner.protocol: return jsonify({"error": "Protocol not found"}), 404
+    
     owner.protocol.status = "active"
     owner.protocol.initiated_at = None
     owner.protocol.initiated_by = None
@@ -571,5 +682,6 @@ def reset_protocol(owner_user_id):
 def health_check(): return jsonify(status="ok", message="LegacyVault Python API is running")
 
 if __name__ == '__main__':
+    # Logging setup removed
     app.run(host="0.0.0.0", port=4455, debug=True)
 
